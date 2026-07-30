@@ -33,6 +33,11 @@ the LEDs can't give you — chiefly *which project* each module belongs to.
 
 Per session: project name, state, how long it's been in that state, and token
 totals (input / output / cache-write / cache-read; hover for exact figures).
+Under those, a **main vs. subagent split** — how much of the session's output
+came from the main thread and how much from dispatched subagents, with the
+count. Hover it for a per-subagent breakdown (type, model, purpose, output
+tokens), heaviest first.
+
 Below that, a Hardware section reads the board's own telemetry — its uptime,
 brightness, staleness flag, buzzer state, free SRAM, and the module states as
 the *firmware* reports them.
@@ -49,6 +54,11 @@ but is re-sent context billed at a fraction of normal input, so the four
 numbers aren't comparable and summing them isn't meaningful — `output` is the
 closest thing to "work done". And totals come from Claude Code's own session
 transcripts, found by session id, so no hook changes were needed.
+
+Subagents write their own transcripts in a sibling directory, so counting only
+the main one undercuts the real figure — measured here at ~19% of output
+tokens across two full sessions. Both are read; the split row is what tells
+you which half of the session actually spent it.
 
 ## States
 
@@ -80,7 +90,8 @@ it reverts to the compiled default on reboot).
 - `state_manager.py` — pure module-assignment / queue / persistence logic
   (no I/O; this is what most of the tests cover)
 - `usage.py` — per-session token totals, read incrementally from Claude Code
-  transcripts; tolerates the file being appended to mid-read
+  transcripts (the main one *and* each subagent's, kept apart); tolerates a
+  file being appended to mid-read
 - `process_utils.py` — finds the Claude Code PID by walking process ancestry,
   and resolves a session's project name from that PID's working directory
 - `report_event.py` — invoked by every hook; POSTs one event and exits
@@ -119,5 +130,6 @@ it isn't auto-started.
 python3 -m pytest bridge/tests/ -v
 ```
 
-Covers `state_manager` and `process_utils`. `bridge.py` (serial + HTTP glue) is
-verified against real hardware rather than unit tests.
+Covers `state_manager`, `process_utils`, `usage`, `serial_port`, and `STATUS`
+parsing. The serial and HTTP glue in `bridge.py` is verified against real
+hardware rather than unit tests.

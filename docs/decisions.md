@@ -189,10 +189,34 @@ The four counts are also not comparable to each other — `cache_read` dominates
 by orders of magnitude but is billed at a fraction of normal input. Summing them
 produces a number that looks alarming and means nothing.
 
+## Subagent tokens are counted, and reported separately
+
+A session's transcript is not one file. Subagents each write their own under
+`<session_id>/subagents/agent-<id>.jsonl`, with an `agent-<id>.meta.json`
+sidecar naming the type, model and purpose. Nested subagents land in that same
+flat directory, so one glob catches every depth.
+
+The first implementation read only `<session_id>.jsonl`. Measured on the two
+sessions that built this project, that missed:
+
+| Session | Main output | Subagent output | Missed |
+|---|---|---|---|
+| Phase 1 + 2 | 898,526 | 166,291 | 18.5% |
+| Heartbeat + dashboard | 523,816 | 100,818 | 19.2% |
+
+Cache-read was worse in absolute terms — 25.7M and 10.4M tokens invisible.
+
+They are **not** merged into one number. Main and subagent output answer
+different questions: a session at 900k output because you had a long
+conversation and a session at 900k because it fanned out 29 agents are not the
+same session, and only the split distinguishes them.
+
+**Don't** collapse this back into a single total.
+
 ## Token totals are read incrementally
 
 Transcripts reach several megabytes and are appended to *while being read*.
-`usage.py` keeps a byte offset per session and consumes only new bytes,
+`usage.py` keeps a byte offset per file and consumes only new bytes,
 stopping at the last complete newline so a half-written trailing line is left
 for the next poll.
 

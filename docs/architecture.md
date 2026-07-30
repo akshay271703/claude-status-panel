@@ -25,7 +25,7 @@ dashboard  (GET / and /api/status)
 | `bridge/bridge.py` | The daemon. Owns the serial port and the HTTP server; runs the background threads. All I/O lives here. |
 | `bridge/state_manager.py` | Which session owns which module, the waiting queue, persistence. **Pure logic, no I/O** — this is what most tests cover. |
 | `bridge/process_utils.py` | Finds a session's Claude Code PID by process ancestry; resolves its project name from that process's working directory. |
-| `bridge/usage.py` | Per-session token totals, read incrementally from Claude Code transcripts. |
+| `bridge/usage.py` | Per-session token totals, read incrementally from Claude Code transcripts — main thread and subagents, counted separately. |
 | `bridge/serial_port.py` | Picks the serial device by USB vendor id. Pure function, testable without hardware. |
 | `bridge/report_event.py` | Invoked by every hook. POSTs one event and exits. |
 | `bridge/install_hooks.py` | One-time setup: writes hook config into `~/.claude/settings.json`. |
@@ -139,13 +139,28 @@ totals. Below that, hardware telemetry straight from `STATUS`.
 **Project names** come from reading each session's process working directory
 via its PID — which is why no hook changes were needed to add them.
 
-**Token totals** come from Claude Code's own transcripts at
-`~/.claude/projects/<dir>/<session_id>.jsonl`, located by session id. They are
-read incrementally: the tracker keeps a byte offset per session and consumes
-only what was appended, leaving a partially-written trailing line alone until
-it is complete. Transcripts reach megabytes and are being written while read,
-so re-parsing from the top or mis-handling a torn line would be both wasteful
-and wrong.
+**Token totals** come from Claude Code's own transcripts, located by session id.
+A session writes two kinds of file:
+
+```
+~/.claude/projects/<dir>/
+  <session_id>.jsonl                        main thread
+  <session_id>/subagents/
+    agent-<id>.jsonl                        one per subagent, any nesting depth
+    agent-<id>.meta.json                    agentType, description, model, spawnDepth
+```
+
+Both are read, and the results are kept apart — the dashboard shows a main vs.
+subagent split with the subagent count, and a per-subagent breakdown on hover.
+Reading only the main transcript undercounts: see
+[decisions.md](decisions.md#subagent-tokens-are-counted-and-reported-separately).
+
+Everything is read incrementally: the tracker keeps a byte offset **per file**
+and consumes only what was appended, leaving a partially-written trailing line
+alone until it is complete. Transcripts reach megabytes and are being written
+while read, so re-parsing from the top or mis-handling a torn line would be
+both wasteful and wrong. The subagents directory is re-globbed every poll,
+since subagents appear while the session runs.
 
 The four token figures are not comparable to each other — `cache_read`
 dominates by orders of magnitude but is re-sent context billed at a fraction of

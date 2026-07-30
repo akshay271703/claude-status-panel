@@ -81,6 +81,19 @@
   }
   .usage .uv { font-size: 14px; font-weight: 620; font-variant-numeric: tabular-nums; margin-top: 1px; }
   .usage.pending { color: var(--dim); font-size: 12px; display: block; }
+  .split { margin-top: 9px; cursor: default; }
+  .splitbar {
+    height: 4px; border-radius: 2px; background: var(--line);
+    display: flex; overflow: hidden; margin-bottom: 5px;
+  }
+  .splitbar i { display: block; height: 100%; }
+  .splitbar i.m { background: var(--dim); }
+  .splitbar i.s { background: var(--text); }
+  .splitrow {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-size: 11.5px; color: var(--dim);
+  }
+  .splitrow b { font-weight: 620; color: var(--text); font-variant-numeric: tabular-nums; }
   .foot { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
   .state { font-size: 13px; font-weight: 620; color: var(--accent, var(--dim)); letter-spacing: .02em; }
   .elapsed { font-size: 13px; color: var(--dim); font-variant-numeric: tabular-nums; }
@@ -175,23 +188,67 @@ function compact(n) {
   return String(n);
 }
 
+function esc(s) {
+  // Agent types and descriptions come from disk, so they go through here
+  // before being interpolated into markup or a title attribute.
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function usageBlock(u) {
   if (!u) {
     // The transcript may not exist yet for a session that just started.
     return '<div class="usage pending">token usage not available yet</div>';
   }
+  const t = u.total;
   const cells = [
-    ['in', u.input_tokens],
-    ['out', u.output_tokens],
-    ['cache w', u.cache_creation_input_tokens],
-    ['cache r', u.cache_read_input_tokens],
+    ['in', t.input_tokens],
+    ['out', t.output_tokens],
+    ['cache w', t.cache_creation_input_tokens],
+    ['cache r', t.cache_read_input_tokens],
   ];
   return '<div class="usage">' + cells.map(([k, v]) =>
     // Exact value in the tooltip: the compact form is for glanceability, but
     // the real number should always be one hover away.
-    `<div title="${k}: ${(v ?? 0).toLocaleString()} tokens">` +
+    `<div title="${k}: ${(v ?? 0).toLocaleString()} tokens (main + subagents)">` +
     `<div class="uk">${k}</div><div class="uv">${compact(v)}</div></div>`
-  ).join('') + '</div>';
+  ).join('') + '</div>' + splitBlock(u);
+}
+
+const TOOLTIP_AGENTS = 12;
+
+function splitBlock(u) {
+  // The totals above are the honest number, but they hide which half of the
+  // session spent it. Subagents were ~19% of output on real sessions here, so
+  // the split is the difference between "I typed a lot" and "I fanned out".
+  const main = u.main.output_tokens;
+  const subs = u.subagents.output_tokens;
+  const n = u.subagent_count;
+
+  if (!n) {
+    return '<div class="split"><div class="splitrow">' +
+      `<span>main <b>${compact(main)}</b> out</span>` +
+      '<span>no subagents</span></div></div>';
+  }
+
+  const total = main + subs;
+  const pct = total ? Math.round((subs / total) * 100) : 0;
+  const lines = u.agents.slice(0, TOOLTIP_AGENTS).map(a =>
+    `${compact(a.output_tokens).padStart(6)}  ${a.type || 'agent'}` +
+    `${a.model ? ' (' + a.model + ')' : ''}` +
+    `${a.description ? ' — ' + a.description : ''}`);
+  if (u.agents.length > TOOLTIP_AGENTS) {
+    lines.push(`… and ${u.agents.length - TOOLTIP_AGENTS} more`);
+  }
+  const tip = `Output tokens by subagent, heaviest first:\n\n${lines.join('\n')}`;
+
+  return `<div class="split" title="${esc(tip)}">` +
+    `<div class="splitbar"><i class="m" style="width:${100 - pct}%"></i>` +
+    `<i class="s" style="width:${pct}%"></i></div>` +
+    '<div class="splitrow">' +
+    `<span>main <b>${compact(main)}</b> out</span>` +
+    `<span><b>${n}</b> subagent${n === 1 ? '' : 's'} · <b>${compact(subs)}</b> out ` +
+    `(${pct}%)</span></div></div>`;
 }
 
 function render(d) {
