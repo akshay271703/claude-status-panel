@@ -1,0 +1,29 @@
+# Arduino
+libraries/
+build/
+*.hex
+*.elf
+
+# Bridge runtime state — machine-specific, regenerated on startup
+bridge/.bridge_state.json
+bridge/*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Claude Code — personal, per-machine settings.
+# Kept here rather than relying on a global gitignore, so the protection
+# travels with the repo to other machines.
+.claude/settings.local.json
+.superpowers/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

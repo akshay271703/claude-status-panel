@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Status Panel</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #181b22;
+    --card-empty: #14161c;
+    --line: #262a34;
+    --text: #e6e8ee;
+    --dim: #838a99;
+    --thinking: #d946ef;
+    --working: #22c55e;
+    --idle: #ef4444;
+    --need-input: #3b82f6;
+    --off: #39404f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f5f8; --card: #ffffff; --card-empty: #f0f1f4;
+      --line: #dfe2e9; --text: #14161c; --dim: #6b7280; --off: #c3c8d2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 24px 40px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px;
+    flex-wrap: wrap; margin-bottom: 22px;
+  }
+  h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .conn { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.ok { background: var(--working); box-shadow: 0 0 0 3px color-mix(in srgb, var(--working) 22%, transparent); }
+  .dot.bad { background: var(--idle); box-shadow: 0 0 0 3px color-mix(in srgb, var(--idle) 22%, transparent); }
+  .dot.warn { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,.22); }
+  .spacer { flex: 1; }
+
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px 18px 16px;
+    display: flex; flex-direction: column; gap: 12px;
+    min-height: 152px; position: relative; overflow: hidden;
+  }
+  .card.empty { background: var(--card-empty); }
+  .card::before {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 4px;
+    background: var(--accent, var(--off));
+  }
+  .card-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .mod { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .swatch {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--accent, var(--off)); flex: none;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--off)) 18%, transparent);
+  }
+  .project {
+    font-size: 21px; font-weight: 640; letter-spacing: -0.015em;
+    word-break: break-word; line-height: 1.25;
+  }
+  .project.none { color: var(--dim); font-weight: 500; font-size: 17px; }
+  .usage {
+    margin-top: auto; padding-top: 11px; border-top: 1px solid var(--line);
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+  }
+  .usage div { min-width: 0; }
+  .usage .uk {
+    font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600; white-space: nowrap;
+  }
+  .usage .uv { font-size: 14px; font-weight: 620; font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .usage.pending { color: var(--dim); font-size: 12px; display: block; }
+  .foot { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .state { font-size: 13px; font-weight: 620; color: var(--accent, var(--dim)); letter-spacing: .02em; }
+  .elapsed { font-size: 13px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  .queue { margin-top: 22px; }
+  .queue h2 { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); margin: 0 0 9px; font-weight: 600; }
+  .qitem {
+    background: var(--card-empty); border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 13px; font-size: 14px; margin-bottom: 7px;
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  .qitem .dimtext { color: var(--dim); font-size: 12.5px; }
+  footer { margin-top: 26px; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .stale { opacity: .45; transition: opacity .2s; }
+
+  .hw { margin-top: 26px; }
+  .hw h2 { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--dim); margin: 0 0 9px; font-weight: 600; }
+  .hw-grid {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  }
+  .stat {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 11px 13px;
+  }
+  .stat .k { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .stat .v { font-size: 19px; font-weight: 620; margin-top: 3px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .stat .v.alert { color: var(--idle); }
+  .stat .v.good { color: var(--working); }
+  .hw-none {
+    background: var(--card-empty); border: 1px dashed var(--line);
+    border-radius: 10px; padding: 13px; color: var(--dim); font-size: 13.5px;
+  }
+  .warn-banner {
+    background: color-mix(in srgb, var(--idle) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--idle) 45%, transparent);
+    color: var(--idle); border-radius: 10px; padding: 10px 13px;
+    font-size: 13.5px; font-weight: 560; margin-bottom: 10px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Claude Status Panel</h1>
+  <div class="conn"><span class="dot" id="serial-dot"></span><span id="serial-text">connecting…</span></div>
+  <div class="spacer"></div>
+  <div class="conn"><span class="dot" id="live-dot"></span><span id="live-text">…</span></div>
+</header>
+
+<div class="grid" id="grid"></div>
+<div class="queue" id="queue-wrap" hidden>
+  <h2>Waiting for a free module</h2>
+  <div id="queue"></div>
+</div>
+
+<div class="hw">
+  <h2>Hardware</h2>
+  <div id="hw-warn"></div>
+  <div class="hw-grid" id="hw-grid"></div>
+</div>
+
+<footer id="footer"></footer>
+
+<script>
+const COLORS = {
+  THINKING: 'var(--thinking)',
+  WORKING: 'var(--working)',
+  IDLE: 'var(--idle)',
+  NEED_INPUT: 'var(--need-input)',
+  OFF: 'var(--off)',
+};
+const LABELS = {
+  THINKING: 'Thinking',
+  WORKING: 'Working',
+  IDLE: 'Awaiting permission',
+  NEED_INPUT: 'Needs you',
+  OFF: 'Idle',
+};
+
+function duration(s) {
+  if (s === null || s === undefined) return '';
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+function compact(n) {
+  if (n === null || n === undefined) return '–';
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function usageBlock(u) {
+  if (!u) {
+    // The transcript may not exist yet for a session that just started.
+    return '<div class="usage pending">token usage not available yet</div>';
+  }
+  const cells = [
+    ['in', u.input_tokens],
+    ['out', u.output_tokens],
+    ['cache w', u.cache_creation_input_tokens],
+    ['cache r', u.cache_read_input_tokens],
+  ];
+  return '<div class="usage">' + cells.map(([k, v]) =>
+    // Exact value in the tooltip: the compact form is for glanceability, but
+    // the real number should always be one hover away.
+    `<div title="${k}: ${(v ?? 0).toLocaleString()} tokens">` +
+    `<div class="uk">${k}</div><div class="uv">${compact(v)}</div></div>`
+  ).join('') + '</div>';
+}
+
+function render(d) {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  for (const m of d.modules) {
+    const claimed = m.session_id !== null;
+    const card = document.createElement('div');
+    card.className = 'card' + (claimed ? '' : ' empty');
+    card.style.setProperty('--accent', COLORS[m.state] || 'var(--off)');
+
+    const name = claimed ? (m.project || 'unknown project') : 'unclaimed';
+    card.innerHTML = `
+      <div class="card-top">
+        <span class="mod">Module ${m.module}</span>
+        <span class="swatch"></span>
+      </div>
+      <div class="project${claimed ? '' : ' none'}"></div>
+      <div class="foot">
+        <span class="state"></span>
+        <span class="elapsed"></span>
+      </div>
+      ${claimed ? usageBlock(m.usage) : ''}`;
+    card.querySelector('.project').textContent = name;
+    card.querySelector('.state').textContent = LABELS[m.state] || m.state;
+    card.querySelector('.elapsed').textContent = claimed ? duration(m.state_seconds) : '';
+    grid.appendChild(card);
+  }
+
+  const qw = document.getElementById('queue-wrap');
+  const q = document.getElementById('queue');
+  qw.hidden = d.queue.length === 0;
+  q.innerHTML = '';
+  for (const item of d.queue) {
+    const el = document.createElement('div');
+    el.className = 'qitem';
+    el.innerHTML = `<span></span><span class="dimtext">pid ${item.claude_pid ?? '?'}</span>`;
+    el.querySelector('span').textContent = item.project || 'unknown project';
+    q.appendChild(el);
+  }
+
+  const sd = document.getElementById('serial-dot');
+  const st = document.getElementById('serial-text');
+  if (d.serial.connected) {
+    sd.className = 'dot ok';
+    st.textContent = d.serial.port + ' connected';
+  } else if (d.serial.reconnecting) {
+    sd.className = 'dot warn';
+    st.textContent = d.serial.port + ' reconnecting…';
+  } else {
+    sd.className = 'dot bad';
+    st.textContent = d.serial.port + ' disconnected';
+  }
+
+  renderHardware(d);
+
+  document.getElementById('footer').textContent =
+    'bridge up ' + duration(d.uptime_seconds);
+}
+
+function stat(k, v, cls) {
+  return `<div class="stat"><div class="k">${k}</div>` +
+         `<div class="v ${cls || ''}">${v}</div></div>`;
+}
+
+function renderHardware(d) {
+  const grid = document.getElementById('hw-grid');
+  const warn = document.getElementById('hw-warn');
+  const hw = d.hardware;
+
+  if (!hw) {
+    warn.innerHTML = '';
+    grid.innerHTML = '<div class="hw-none">No telemetry — the board isn\'t answering ' +
+      'STATUS. Either the serial link is down, or it\'s running firmware without ' +
+      'the STATUS verb.</div>';
+    return;
+  }
+
+  // Bridge and firmware disagreeing means a command was lost or rejected.
+  // Nothing else in the system can see this, so it gets top billing.
+  warn.innerHTML = (hw.desync && hw.desync.length)
+    ? `<div class="warn-banner">Desync: module ${hw.desync.join(', ')} — the board ` +
+      `is showing something different from what the bridge last sent.</div>`
+    : '';
+
+  const ramLow = hw.free_ram_bytes < 400;
+  grid.innerHTML = [
+    stat('Board uptime', duration(hw.uptime_seconds)),
+    stat('Brightness', hw.brightness_pct + '%'),
+    stat('Contact', hw.stale ? 'stale' : 'fresh', hw.stale ? 'alert' : 'good'),
+    stat('Buzzer', hw.buzzer ? 'sounding' : 'silent', hw.buzzer ? 'alert' : ''),
+    stat('Free SRAM', hw.free_ram_bytes + ' B', ramLow ? 'alert' : ''),
+    stat('Board sees', hw.modules.map(m => (m || '?').replace('NEED_INPUT', 'NEED')).join(' · ')),
+  ].join('');
+}
+
+let failures = 0;
+async function poll() {
+  const liveDot = document.getElementById('live-dot');
+  const liveText = document.getElementById('live-text');
+  try {
+    const r = await fetch('/api/status', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    render(await r.json());
+    failures = 0;
+    document.body.classList.remove('stale');
+    liveDot.className = 'dot ok';
+    liveText.textContent = 'live';
+  } catch (e) {
+    failures++;
+    // One miss is a blip; several means the bridge is genuinely gone, and the
+    // page must say so rather than quietly showing a frozen panel.
+    if (failures >= 3) {
+      document.body.classList.add('stale');
+      liveDot.className = 'dot bad';
+      liveText.textContent = 'bridge unreachable';
+    }
+  }
+}
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# Normalise line endings so the repo moves cleanly between Windows and Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.hex binary
