@@ -30,6 +30,8 @@ EVENTS = {
     "Notification": "notification",
     "Stop": "stop",
     "SessionEnd": "session_end",
+    "SubagentStart": "subagent_start",
+    "SubagentStop": "subagent_stop",
 }
 
 # Notification is a delayed nudge (~6s after a prompt goes unanswered), so it

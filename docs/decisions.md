@@ -228,3 +228,127 @@ behaviours are pinned by tests.
 
 Yellow (R+G) reads as green-dominant to the eye and was too easily confused
 with `WORKING` (green) at a glance. Magenta (R+B) shares no channel with green.
+
+**Superseded by the ring redesign below** — v2 (`status_ring.ino`) collapses
+`THINKING` into `WORKING` and no longer has an equivalent state. Kept here for
+history; the reasoning (yellow reads as green-dominant) is still true of any
+future colour choice on this hardware.
+
+---
+
+# v2: the 16-LED ring (`status_ring.ino`)
+
+The entries below describe the redesign that replaced the 3-module board with
+a single WS2812B/NeoPixel ring. See [protocol.md](protocol.md) and
+[architecture.md](architecture.md) for the full current behaviour; these are
+just the decisions worth not re-litigating.
+
+## The panel is no longer capped at three modules
+
+The [old cap](#the-panel-is-capped-at-three-modules) was a pin limit, not an
+architectural one, and the fix anticipated there — addressable LEDs needing
+one pin for any number of LEDs — is exactly what shipped: a 16-LED WS2812B
+ring on a single data pin (D6). `status_panel.ino` and its 3-module wiring are
+kept as a legacy reference, not removed; `status_ring.ino` is the new primary
+sketch. `MODULE_NUMBERS` widened from `(1, 2, 3)` to `range(1, 17)` in
+`state_manager.py` with **no other structural change** — the assign/release/
+queue/persist logic was already generic over an opaque claimant key, which is
+exactly what let subagents reuse it too (see below).
+
+## Subagents are claimants on the same pool as sessions, not a token-usage-only concern
+
+Before this, `usage.py` tracked subagent token totals purely for the
+dashboard — the physical board had no idea a subagent existed. Now a
+subagent claims its own slot on the same 16-slot pool a session does, via a
+synthetic key `f"{session_id}#agent:{agent_id}"`. This reuses
+`_assign_module`/`_release_module`/the FIFO queue **unmodified** — a
+subagent is, as far as that machinery is concerned, just another claimant.
+
+**Don't** special-case subagent assignment logic. If it needs to behave
+differently from a session claiming a slot, that's a sign the generic
+machinery is the wrong layer for the change.
+
+## `SubagentStart`/`SubagentStop` are used directly — not file-activity polling
+
+An earlier pass of this design deliberately avoided registering new hooks for
+subagent lifecycle, planning instead to infer "is this subagent still active"
+from whether its transcript file (`usage.py` already polls these) grew in the
+last poll — because this project has a real history of Claude Code hook
+behaviour not matching casual assumptions (see "`IDLE` comes from
+`PermissionRequest`" above), and the existence/reliability of subagent-specific
+hook events hadn't been confirmed.
+
+Checking https://code.claude.com/docs/en/hooks.md directly confirmed
+`SubagentStart` and `SubagentStop` are real, documented events, both carrying
+a stable `agent_id` correlating start and stop precisely. That's strictly
+better than a polling heuristic — real-time, exact, no debounce window, no
+lingering state — so the design switched to using them directly.
+**`usage.py` is completely untouched by this feature**; it remains solely a
+token-accounting concern, unrelated to the LEDs.
+
+**Don't** reintroduce file-activity polling for subagent presence "to avoid
+depending on a hook" — the hook is the better mechanism *because* it was
+actually verified, not assumed.
+
+## `agent_id` is a noise guard, not just an identifier
+
+The same official-docs check surfaced something that would have broken the
+`DISPATCHED` (purple) state if missed: `PreToolUse`/`PostToolUse` fire for
+tool calls made **inside** a dispatched subagent too, carrying the **parent's**
+`session_id` — not a subagent-specific one. Without a guard, a subagent's own
+`Bash`/`Read`/etc. calls would flip the parent session's slot from
+`DISPATCHED` back to `WORKING` every time, because they arrive as ordinary
+`pre_tool_use` events against the parent's session_id.
+
+The fix: `agent_id` is present *only* when a hook fires inside a subagent
+call. `state_manager.handle_event()` ignores any event carrying an `agent_id`
+unless that event is itself `subagent_start`/`subagent_stop` — subagent-
+internal tool calls are noise as far as either slot (the parent's or the
+subagent's own) is concerned; the subagent's slot is driven exclusively by
+its own start/stop events, never by its internal tool use.
+
+**Don't** remove this guard "to simplify" — `DISPATCHED` cannot hold for more
+than an instant without it, on any session whose dispatched subagent makes
+more than zero tool calls (i.e. essentially all of them).
+
+## Solid vs. blinking green tells sessions and subagents apart
+
+A working session and a running subagent share the same green — no separate
+colour was spent on it. The distinction is solid (session, `WORKING`) vs.
+blinking (subagent, `RUNNING`), a deliberate choice so a glance answers both
+"how many are active" (green count) and "which of those are subagents"
+(which ones blink), without adding a colour that then has to be told apart
+from the other four under normal desk lighting.
+
+This is why `RUNNING` is a distinct *state* name from `WORKING` even though
+they render the same colour — the firmware's per-state `{colour, blinks}`
+table needs two entries to blink one and not the other; a single `WORKING`
+state with a side-channel "role" flag would work too, but the state-name
+split keeps the wire protocol and `state_manager.py` boring (a state fully
+determines its rendering, no second field to keep in sync).
+
+## The alarm moved from the turn-ended state to the blocked state
+
+v1's alarm was tied to `NEED_INPUT`, fired on `Stop` (the session's turn
+ending — "done, waiting for whatever you send next"). v2 splits that
+former single state into two: `IDLE` (turn ended, calm, no urgency) and
+`BLOCKED` (a permission prompt — genuinely can't proceed without a decision
+from you). The alarm now attaches only to `BLOCKED`.
+
+**Don't** attach the alarm to `IDLE` — it's deliberately the calm state, and
+alarming on it would make every ordinary end-of-turn as loud as a stuck
+permission prompt.
+
+## A finished subagent's slot releases immediately, with no lingering colour
+
+An earlier draft of this design had subagents linger in a `DONE` (red-blink)
+state for a grace period before auto-releasing, modeled on the uncertainty
+around whether `SubagentStop` would fire reliably/exactly once. Once
+`SubagentStop` was confirmed as a real, correlated event (see above), the
+grace period became unnecessary complexity: the subagent's slot now goes
+straight to `OFF` the moment `SubagentStop` arrives. There is no `DONE` state
+in the v2 vocabulary at all.
+
+**Don't** reintroduce a lingering post-completion state for subagents "to make
+it easier to see what just finished" — that was explicitly not wanted: a
+subagent should "do its work and close," full stop.
