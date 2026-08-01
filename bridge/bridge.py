@@ -9,9 +9,20 @@ from pathlib import Path
 import serial
 
 import serial_port
-from state_manager import StateManager
+from state_manager import StateManager, is_agent_key
 from process_utils import is_pid_alive, project_name_for_pid
 from usage import UsageTracker
+
+# One character per ring slot in STATUS's packed `ring=` field.
+RING_STATE_CODES = {
+    "W": "WORKING",
+    "D": "DISPATCHED",
+    "B": "BLOCKED",
+    "I": "IDLE",
+    "R": "RUNNING",
+    "O": "OFF",
+}
+PROTOCOL_VERSION = "2"
 
 BAUD_RATE = 9600
 HTTP_HOST = os.environ.get("STATUS_PANEL_HOST", "127.0.0.1")
@@ -20,13 +31,26 @@ LIVENESS_POLL_SECONDS = 5
 PING_INTERVAL_SECONDS = 3
 STATUS_INTERVAL_SECONDS = 2
 USAGE_INTERVAL_SECONDS = 5
-PERSISTENCE_PATH = Path(__file__).parent / ".bridge_state.json"
+PERSISTENCE_PATH = Path(os.environ.get(
+    "STATUS_PANEL_STATE_FILE", str(Path(__file__).parent / ".bridge_state.json")
+))
 DASHBOARD_PATH = Path(__file__).parent / "dashboard.html"
+SIMULATOR_PATH = Path(__file__).parent / "simulator.html"
 
 
 class Bridge:
-    def __init__(self, port):
+    def __init__(self, port, serial_open=None):
+        """`serial_open`, if given, is a zero-arg callable returning a connected,
+        pyserial-compatible object (write/readline/reset_input_buffer/close) --
+        or raising OSError/serial.SerialException on failure. Defaults to
+        opening `port` for real. This is the only seam the simulator needs:
+        everything else (state_manager, the HTTP server, the background
+        threads) runs completely unchanged against a fake connection.
+        """
         self.port = port
+        self._serial_open = serial_open or (
+            lambda: serial.Serial(self.port, BAUD_RATE, timeout=1, write_timeout=1)
+        )
         self.ser = None
         self._lock = threading.Lock()
         self._reconnecting = False
@@ -41,7 +65,7 @@ class Bridge:
     def _open_serial(self):
         """One attempt. Returns True on success. Never raises."""
         try:
-            self.ser = serial.Serial(self.port, BAUD_RATE, timeout=1, write_timeout=1)
+            self.ser = self._serial_open()
             time.sleep(2)  # let the board finish its reset before we send anything
             return True
         except (OSError, serial.SerialException) as e:
@@ -96,9 +120,11 @@ class Bridge:
                 self._start_reconnect()
                 return
 
-    def handle_event(self, session_id, event, claude_pid):
+    def handle_event(self, session_id, event, claude_pid, tool_name=None, agent_id=None):
         with self._lock:
-            commands = self.state.handle_event(session_id, event, claude_pid)
+            commands = self.state.handle_event(
+                session_id, event, claude_pid, tool_name=tool_name, agent_id=agent_id
+            )
             self._send_locked(commands)
 
     def liveness_loop(self):
@@ -140,8 +166,13 @@ class Bridge:
             try:
                 with self._lock:
                     snap = self.state.snapshot()
-                live = {m["session_id"] for m in snap["modules"] if m["session_id"]}
-                live |= {q["session_id"] for q in snap["queue"]}
+                # A subagent's slot has no transcript of its own to poll by its
+                # synthetic key -- only its parent session does.
+                live = {
+                    m["session_id"] for m in snap["modules"]
+                    if m["session_id"] and not is_agent_key(m["session_id"])
+                }
+                live |= {q["session_id"] for q in snap["queue"] if not is_agent_key(q["session_id"])}
 
                 fresh = {}
                 for session_id in live:
@@ -208,7 +239,7 @@ class Bridge:
             self._send_locked(commands)
 
     def status(self):
-        """Dashboard payload. Cheap enough to poll once a second."""
+        """Dashboard payload. Polled by the page every 5s."""
         with self._lock:
             snap = self.state.snapshot()
             serial_connected = self.ser is not None
@@ -246,11 +277,12 @@ class Bridge:
 
 
 def parse_status(line):
-    """Parse `STATUS up=1 dim=5 stale=0 buzz=0 ram=1561 m1=OFF ...`.
+    """Parse `STATUS up=1 dim=5 stale=0 buzz=0 ram=1561 ver=2 ring=WWDBIROO...`.
 
-    Returns None on anything unparseable rather than raising -- a firmware
-    that answers differently should degrade to "no telemetry", not break
-    the dashboard.
+    `ring` is one character per slot (1-16, in order) from RING_STATE_CODES --
+    16 `mN=` tokens the way v1 had would run to ~130 characters. Returns None
+    on anything unparseable rather than raising -- a firmware that answers
+    differently should degrade to "no telemetry", not break the dashboard.
     """
     try:
         fields = dict(
@@ -264,7 +296,8 @@ def parse_status(line):
             "stale": fields["stale"] == "1",
             "buzzer": fields["buzz"] == "1",
             "free_ram_bytes": int(fields["ram"]),
-            "modules": [fields.get(f"m{i}") for i in (1, 2, 3)],
+            "protocol_version": fields.get("ver"),
+            "modules": [RING_STATE_CODES[c] for c in fields["ring"]],
         }
     except Exception:
         return None
@@ -280,7 +313,7 @@ def make_handler(bridge):
             self.send_response(code)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(payload)))
-            # Polled once a second; never let a proxy or the browser serve a
+            # Polled every 5s; never let a proxy or the browser serve a
             # stale panel, which would be worse than showing nothing.
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -290,6 +323,13 @@ def make_handler(bridge):
             try:
                 if self.path in ("/", "/index.html"):
                     self._send(200, DASHBOARD_PATH.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+                    return
+                if self.path == "/simulator":
+                    # A dedicated, bigger view of whatever board is connected --
+                    # real or (via simulator/virtual_board.py) simulated. Reads
+                    # the same /api/status the dashboard does; no special-casing
+                    # for simulation lives here.
+                    self._send(200, SIMULATOR_PATH.read_text(encoding="utf-8"), "text/html; charset=utf-8")
                     return
                 if self.path == "/api/status":
                     self._send(200, json.dumps(bridge.status()), "application/json")
@@ -313,7 +353,10 @@ def make_handler(bridge):
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
-                bridge.handle_event(body["session_id"], body["event"], body["claude_pid"])
+                bridge.handle_event(
+                    body["session_id"], body["event"], body["claude_pid"],
+                    tool_name=body.get("tool_name"), agent_id=body.get("agent_id"),
+                )
                 self.send_response(200)
             except Exception as e:
                 # Drop bad events, but never silently: without this line a
@@ -326,15 +369,17 @@ def make_handler(bridge):
     return Handler
 
 
-def main():
-    try:
-        port = serial_port.resolve()
-    except RuntimeError as e:
-        print(f"Cannot start: {e}")
-        raise SystemExit(1)
+def run(port, serial_open=None):
+    """Start a Bridge against `port` and serve forever. Never returns.
 
-    print(f"Opening serial port {port}@{BAUD_RATE}...")
-    bridge = Bridge(port)
+    Factored out of main() so the simulator can call it directly with an
+    injected `serial_open` (see Bridge.__init__) instead of a real device --
+    everything else (state_manager, the dashboard, the background threads)
+    runs exactly as it does against real hardware.
+    """
+    label = port if serial_open is None else f"{port} (simulated)"
+    print(f"Opening serial port {label}@{BAUD_RATE}..." if serial_open is None else f"Using {label}...")
+    bridge = Bridge(port, serial_open=serial_open)
     bridge.recover()
 
     threading.Thread(target=bridge.liveness_loop, daemon=True).start()
@@ -345,6 +390,15 @@ def main():
     server = ThreadingHTTPServer((HTTP_HOST, HTTP_PORT), make_handler(bridge))
     print(f"Bridge listening on http://{HTTP_HOST}:{HTTP_PORT}/event")
     server.serve_forever()
+
+
+def main():
+    try:
+        port = serial_port.resolve()
+    except RuntimeError as e:
+        print(f"Cannot start: {e}")
+        raise SystemExit(1)
+    run(port)
 
 
 if __name__ == "__main__":

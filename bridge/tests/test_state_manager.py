@@ -3,13 +3,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import json
-from state_manager import StateManager
+from state_manager import StateManager, MODULE_NUMBERS
+
+
+def fill_slots(sm, n, start_pid=100):
+    """Claim n slots with session_start events, session ids sess-0..sess-{n-1}.
+
+    The pool is 16 wide, so exercising the queue path by hand (as the old
+    3-slot tests did) would mean writing out 17 session ids per test. This
+    is the shared way to get there economically.
+    """
+    return [sm.handle_event(f"sess-{i}", "session_start", claude_pid=start_pid + i) for i in range(n)]
 
 
 def test_first_session_gets_module_1():
     sm = StateManager()
     commands = sm.handle_event("session-a", "session_start", claude_pid=111)
-    assert commands == ["1:THINKING"]
+    assert commands == ["1:WORKING"]
 
 
 def test_three_sessions_get_three_distinct_modules():
@@ -17,17 +27,15 @@ def test_three_sessions_get_three_distinct_modules():
     c1 = sm.handle_event("session-a", "session_start", claude_pid=111)
     c2 = sm.handle_event("session-b", "session_start", claude_pid=222)
     c3 = sm.handle_event("session-c", "session_start", claude_pid=333)
-    assert c1 == ["1:THINKING"]
-    assert c2 == ["2:THINKING"]
-    assert c3 == ["3:THINKING"]
+    assert c1 == ["1:WORKING"]
+    assert c2 == ["2:WORKING"]
+    assert c3 == ["3:WORKING"]
 
 
-def test_fourth_session_is_queued_not_assigned():
+def test_seventeenth_claimant_is_queued_not_assigned():
     sm = StateManager()
-    sm.handle_event("session-a", "session_start", claude_pid=111)
-    sm.handle_event("session-b", "session_start", claude_pid=222)
-    sm.handle_event("session-c", "session_start", claude_pid=333)
-    commands = sm.handle_event("session-d", "session_start", claude_pid=444)
+    fill_slots(sm, len(MODULE_NUMBERS))
+    commands = sm.handle_event("sess-overflow", "session_start", claude_pid=999)
     assert commands == []
 
 
@@ -53,13 +61,11 @@ def test_session_end_frees_module_and_sends_off_when_queue_empty():
 
 def test_session_end_assigns_freed_module_to_next_queued_session():
     sm = StateManager()
-    sm.handle_event("session-a", "session_start", claude_pid=111)
-    sm.handle_event("session-b", "session_start", claude_pid=222)
-    sm.handle_event("session-c", "session_start", claude_pid=333)
-    sm.handle_event("session-d", "session_start", claude_pid=444)  # queued
-    sm.handle_event("session-d", "pre_tool_use", claude_pid=444)   # still queued, updates its remembered state
-    commands = sm.handle_event("session-a", "session_end", claude_pid=111)
-    assert commands == ["1:WORKING"]  # session-d dequeued onto module 1, with its last known state
+    fill_slots(sm, len(MODULE_NUMBERS))
+    sm.handle_event("sess-overflow", "session_start", claude_pid=999)  # queued
+    sm.handle_event("sess-overflow", "pre_tool_use", claude_pid=999)   # still queued, updates its remembered state
+    commands = sm.handle_event("sess-0", "session_end", claude_pid=100)
+    assert commands == ["1:WORKING"]  # sess-overflow dequeued onto module 1, with its last known state
 
 
 def test_session_end_for_unknown_session_is_a_no_op():
@@ -70,28 +76,23 @@ def test_session_end_for_unknown_session_is_a_no_op():
 
 def test_queued_session_receiving_second_event_does_not_duplicate_queue_entry():
     sm = StateManager()
-    sm.handle_event("session-a", "session_start", claude_pid=111)
-    sm.handle_event("session-b", "session_start", claude_pid=222)
-    sm.handle_event("session-c", "session_start", claude_pid=333)
-    sm.handle_event("session-d", "session_start", claude_pid=444)  # queued
-    sm.handle_event("session-d", "pre_tool_use", claude_pid=444)   # still queued, must NOT duplicate
-    sm.handle_event("session-a", "session_end", claude_pid=111)  # frees module 1 -> session-d
-    commands = sm.handle_event("session-b", "session_end", claude_pid=222)  # frees module 2
+    fill_slots(sm, len(MODULE_NUMBERS))
+    sm.handle_event("sess-overflow", "session_start", claude_pid=999)  # queued
+    sm.handle_event("sess-overflow", "pre_tool_use", claude_pid=999)   # still queued, must NOT duplicate
+    sm.handle_event("sess-0", "session_end", claude_pid=100)  # frees module 1 -> sess-overflow
+    commands = sm.handle_event("sess-1", "session_end", claude_pid=101)  # frees module 2
     # module 2 should go OFF (no one left queued) -- if the duplication bug were present,
-    # session-d would incorrectly be reassigned to module 2 as well
+    # sess-overflow would incorrectly be reassigned to module 2 as well
     assert commands == ["2:OFF"]
 
 
 def test_queued_session_can_end_before_being_dequeued():
     sm = StateManager()
-    sm.handle_event("session-a", "session_start", claude_pid=111)
-    sm.handle_event("session-b", "session_start", claude_pid=222)
-    sm.handle_event("session-c", "session_start", claude_pid=333)
-    sm.handle_event("session-d", "session_start", claude_pid=444)  # queued
-    commands = sm.handle_event("session-d", "session_end", claude_pid=444)  # ends while still queued
+    fill_slots(sm, len(MODULE_NUMBERS))
+    commands = sm.handle_event("sess-overflow", "session_end", claude_pid=999)  # ends while still queued
     assert commands == []
-    # module 1 should still be free for session-a's eventual replacement, not haunted by session-d
-    commands2 = sm.handle_event("session-a", "session_end", claude_pid=111)
+    # module 1 should still be free for sess-0's eventual replacement, not haunted by sess-overflow
+    commands2 = sm.handle_event("sess-0", "session_end", claude_pid=100)
     assert commands2 == ["1:OFF"]
 
 
@@ -140,7 +141,7 @@ def test_load_and_recover_with_no_file_returns_no_commands(tmp_path):
 def test_recovered_session_frees_its_module_normally_afterward(tmp_path):
     path = tmp_path / "state.json"
     path.write_text(json.dumps({
-        "session-a": {"module": 2, "last_known_state": "NEED_INPUT", "claude_pid": 111},
+        "session-a": {"module": 2, "last_known_state": "IDLE", "claude_pid": 111},
     }))
     sm = StateManager(persistence_path=path, liveness_check=lambda pid: True)
     sm.load_and_recover()
@@ -193,17 +194,17 @@ def test_current_commands_repaints_all_assigned_modules():
     sm = StateManager()
     sm.handle_event("session-a", "session_start", claude_pid=111)
     sm.handle_event("session-b", "pre_tool_use", claude_pid=222)
-    assert sorted(sm.current_commands()) == ["1:THINKING", "2:WORKING"]
+    assert sorted(sm.current_commands()) == ["1:WORKING", "2:WORKING"]
 
 
 def test_current_commands_empty_when_nothing_assigned():
     assert StateManager().current_commands() == []
 
 
-def test_snapshot_reports_all_three_modules_with_unclaimed_as_off():
+def test_snapshot_reports_all_sixteen_modules_with_unclaimed_as_off():
     sm = StateManager()
     snap = sm.snapshot()
-    assert [m["module"] for m in snap["modules"]] == [1, 2, 3]
+    assert [m["module"] for m in snap["modules"]] == list(range(1, 17))
     assert all(m["state"] == "OFF" and m["session_id"] is None for m in snap["modules"])
     assert snap["queue"] == []
 
@@ -236,20 +237,20 @@ def test_changing_state_does_reset_the_clock():
     sm = StateManager(time_source=lambda: clock[0])
     sm.handle_event("session-a", "pre_tool_use", claude_pid=111)
     clock[0] = 1005.0
-    sm.handle_event("session-a", "stop", claude_pid=111)  # WORKING -> NEED_INPUT
+    sm.handle_event("session-a", "stop", claude_pid=111)  # WORKING -> IDLE
     clock[0] = 1008.0
     m1 = sm.snapshot()["modules"][0]
-    assert m1["state"] == "NEED_INPUT"
+    assert m1["state"] == "IDLE"
     assert m1["state_seconds"] == 3.0
 
 
 def test_snapshot_lists_queued_sessions():
     sm = StateManager()
-    for i, sid in enumerate(["a", "b", "c", "d"]):
-        sm.handle_event(sid, "session_start", claude_pid=100 + i)
+    fill_slots(sm, len(MODULE_NUMBERS))
+    sm.handle_event("sess-overflow", "session_start", claude_pid=999)
     snap = sm.snapshot()
-    assert [q["session_id"] for q in snap["queue"]] == ["d"]
-    assert snap["queue"][0]["claude_pid"] == 103
+    assert [q["session_id"] for q in snap["queue"]] == ["sess-overflow"]
+    assert snap["queue"][0]["claude_pid"] == 999
 
 
 def test_released_session_clears_its_clock():
@@ -257,3 +258,88 @@ def test_released_session_clears_its_clock():
     sm.handle_event("session-a", "session_start", claude_pid=111)
     sm.handle_event("session-a", "session_end", claude_pid=111)
     assert sm.snapshot()["modules"][0]["state_seconds"] is None
+
+
+# --- New in v2: Task dispatch (DISPATCHED/purple) ---
+
+def test_pre_tool_use_for_task_tool_sets_dispatched():
+    sm = StateManager()
+    sm.handle_event("session-a", "session_start", claude_pid=111)
+    commands = sm.handle_event("session-a", "pre_tool_use", claude_pid=111, tool_name="Task")
+    assert commands == ["1:DISPATCHED"]
+
+
+def test_pre_tool_use_for_other_tools_sets_working():
+    sm = StateManager()
+    sm.handle_event("session-a", "session_start", claude_pid=111)
+    commands = sm.handle_event("session-a", "pre_tool_use", claude_pid=111, tool_name="Bash")
+    assert commands == ["1:WORKING"]
+
+
+def test_pre_tool_use_with_no_tool_name_defaults_to_working():
+    sm = StateManager()
+    sm.handle_event("session-a", "session_start", claude_pid=111)
+    commands = sm.handle_event("session-a", "pre_tool_use", claude_pid=111)
+    assert commands == ["1:WORKING"]
+
+
+# --- New in v2: subagents claim/release their own slot ---
+
+def test_subagent_start_claims_a_distinct_slot_from_its_parent():
+    sm = StateManager()
+    sm.handle_event("session-a", "session_start", claude_pid=111)  # module 1
+    commands = sm.handle_event("session-a", "subagent_start", claude_pid=111, agent_id="agent-1")
+    assert commands == ["2:RUNNING"]
+
+
+def test_subagent_stop_releases_its_slot_immediately():
+    sm = StateManager()
+    sm.handle_event("session-a", "subagent_start", claude_pid=111, agent_id="agent-1")
+    commands = sm.handle_event("session-a", "subagent_stop", claude_pid=111, agent_id="agent-1")
+    assert commands == ["1:OFF"]
+
+
+def test_subagent_stop_for_unknown_agent_is_a_no_op():
+    sm = StateManager()
+    commands = sm.handle_event("session-a", "subagent_stop", claude_pid=111, agent_id="never-started")
+    assert commands == []
+
+
+def test_two_subagents_of_the_same_session_get_distinct_slots():
+    sm = StateManager()
+    c1 = sm.handle_event("session-a", "subagent_start", claude_pid=111, agent_id="agent-1")
+    c2 = sm.handle_event("session-a", "subagent_start", claude_pid=111, agent_id="agent-2")
+    assert c1 == ["1:RUNNING"]
+    assert c2 == ["2:RUNNING"]
+
+
+def test_dead_parent_pid_frees_its_subagents_slot_too():
+    dead_pids = {111}
+    sm = StateManager(liveness_check=lambda pid: pid not in dead_pids)
+    sm.handle_event("session-a", "subagent_start", claude_pid=111, agent_id="agent-1")
+    commands = sm.check_liveness()
+    assert commands == ["1:OFF"]
+
+
+# --- New in v2: agent_id is a noise guard for everything except subagent lifecycle ---
+
+def test_pre_tool_use_carrying_agent_id_does_not_touch_the_parent_slot():
+    sm = StateManager()
+    sm.handle_event("session-a", "session_start", claude_pid=111)  # module 1, WORKING
+    sm.handle_event("session-a", "pre_tool_use", claude_pid=111, tool_name="Task")  # module 1, DISPATCHED
+    # A subagent's own internal tool call carries the parent's session_id
+    # too, but is tagged with agent_id -- it must not flip the parent back
+    # to WORKING, or "purple while waiting on subagents" could never hold.
+    commands = sm.handle_event(
+        "session-a", "pre_tool_use", claude_pid=111, tool_name="Bash", agent_id="agent-1"
+    )
+    assert commands == []
+    assert sm.snapshot()["modules"][0]["state"] == "DISPATCHED"
+
+
+def test_stop_carrying_agent_id_is_ignored():
+    sm = StateManager()
+    sm.handle_event("session-a", "session_start", claude_pid=111)
+    commands = sm.handle_event("session-a", "stop", claude_pid=111, agent_id="agent-1")
+    assert commands == []
+    assert sm.snapshot()["modules"][0]["state"] == "WORKING"

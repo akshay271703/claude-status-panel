@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ring Simulator — Claude Status Panel</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #181b22;
+    --line: #262a34;
+    --text: #e6e8ee;
+    --dim: #838a99;
+    --working: #22c55e;
+    --dispatched: #a855f7;
+    --idle: #ef4444;
+    --blocked: #3b82f6;
+    --off: #2a2f3a;
+    --off-ring: #3a4050;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f5f8; --card: #ffffff; --line: #dfe2e9; --text: #14161c;
+      --dim: #6b7280; --off: #e2e5eb; --off-ring: #c3c8d2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 24px 40px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 8px;
+  }
+  h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  a.back { color: var(--dim); font-size: 13px; text-decoration: none; }
+  a.back:hover { color: var(--text); }
+  .spacer { flex: 1; }
+  .conn { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); flex: none; }
+  .dot.ok { background: var(--working); box-shadow: 0 0 0 3px color-mix(in srgb, var(--working) 22%, transparent); }
+  .dot.bad { background: var(--idle); box-shadow: 0 0 0 3px color-mix(in srgb, var(--idle) 22%, transparent); }
+  p.sub { color: var(--dim); font-size: 13.5px; margin: 0 0 26px; }
+
+  .layout { display: flex; gap: 32px; flex-wrap: wrap; align-items: flex-start; }
+
+  .ring-wrap {
+    width: 360px; height: 360px; position: relative; flex: none;
+    border-radius: 50%; background: var(--card); border: 1px solid var(--line);
+  }
+  .ring-wrap.stale { opacity: .35; filter: grayscale(.6); transition: opacity .3s, filter .3s; }
+  .led {
+    position: absolute; width: 34px; height: 34px; border-radius: 50%;
+    background: var(--off-ring); transform: translate(-50%, -50%);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: rgba(0,0,0,.35);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--text) 8%, transparent);
+    cursor: default;
+  }
+  @keyframes blink-fade { 0%, 49% { opacity: 1; } 50%, 100% { opacity: .28; } }
+  .led.blink { animation: blink-fade .9s steps(1, end) infinite; }
+  .center {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    text-align: center; width: 150px;
+  }
+  .heartbeat {
+    width: 10px; height: 10px; border-radius: 50%; margin: 0 auto 6px;
+    background: var(--off-ring);
+  }
+  @keyframes heartbeat-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  .heartbeat.live { background: var(--working); animation: heartbeat-pulse 2s ease-in-out infinite; }
+  .center .up { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .center .none { font-size: 13px; color: var(--dim); }
+
+  .panel {
+    flex: 1; min-width: 260px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .stat {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px;
+  }
+  .stat .k { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .stat .v { font-size: 19px; font-weight: 620; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .stat .v.alert { color: var(--idle); }
+  .stat .v.good { color: var(--working); }
+
+  .buzzer-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 15px; display: flex; align-items: center; gap: 12px;
+  }
+  .buzzer-icon { font-size: 20px; opacity: .3; }
+  .buzzer-card.active .buzzer-icon { opacity: 1; animation: blink-fade .5s steps(1, end) infinite; }
+  .buzzer-text { font-size: 13.5px; color: var(--dim); flex: 1; }
+  .buzzer-card.active .buzzer-text { color: var(--idle); font-weight: 600; }
+  button.silence {
+    background: var(--card); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+    cursor: pointer;
+  }
+  button.silence:hover { border-color: var(--dim); }
+  button.silence:disabled { opacity: .4; cursor: default; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 12.5px; color: var(--dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+
+  .control-row {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim);
+  }
+  .control-row input {
+    width: 70px; background: var(--bg); border: 1px solid var(--line); color: var(--text);
+    border-radius: 6px; padding: 4px 7px; font-size: 12.5px; font-variant-numeric: tabular-nums;
+  }
+  .hint { font-size: 12px; color: var(--dim); }
+  .slot-list { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; max-height: 220px; overflow-y: auto; }
+  .slot-list .row { display: flex; justify-content: space-between; gap: 8px; }
+  .slot-list .row b { font-variant-numeric: tabular-nums; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ring Simulator</h1>
+  <a class="back" href="/">← full dashboard</a>
+  <div class="spacer"></div>
+  <div class="conn"><span class="dot" id="live-dot"></span><span id="live-text">…</span></div>
+</header>
+<p class="sub">
+  A dedicated view of whatever board is answering STATUS — real hardware, or
+  <code>simulator/virtual_board.py</code> with none plugged in. Same data as
+  the dashboard's hardware panel, drawn as an actual ring.
+</p>
+
+<div class="layout">
+  <div class="ring-wrap" id="ring-wrap">
+    <div class="center">
+      <div class="heartbeat" id="heartbeat"></div>
+      <div class="up" id="up-text">–</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="stat-row" id="stat-row"></div>
+
+    <div class="buzzer-card" id="buzzer-card">
+      <div class="buzzer-icon">🔔</div>
+      <div class="buzzer-text" id="buzzer-text">Quiet</div>
+      <button class="silence" id="silence-btn">Press silence button</button>
+    </div>
+
+    <div class="control-row">
+      <label for="control-port">Virtual board control port:</label>
+      <input id="control-port" type="number" value="8766">
+      <span class="hint">only needed for the silence button — real hardware has a physical one</span>
+    </div>
+
+    <div class="legend" id="legend"></div>
+
+    <div class="slot-list" id="slot-list"></div>
+  </div>
+</div>
+
+<script>
+const COLORS = {
+  WORKING: 'var(--working)',
+  DISPATCHED: 'var(--dispatched)',
+  BLOCKED: 'var(--blocked)',
+  IDLE: 'var(--idle)',
+  RUNNING: 'var(--working)',
+  OFF: null,
+};
+const LABELS = {
+  WORKING: 'Working', DISPATCHED: 'Waiting on subagents', BLOCKED: 'Needs you',
+  IDLE: 'Idle', RUNNING: 'Subagent running', OFF: 'Unclaimed',
+};
+const BLINKING = new Set(['BLOCKED', 'IDLE', 'RUNNING']);
+const NUM_SLOTS = 16;
+
+const controlPortInput = document.getElementById('control-port');
+controlPortInput.value = localStorage.getItem('simControlPort') || '8766';
+controlPortInput.addEventListener('change', () => {
+  localStorage.setItem('simControlPort', controlPortInput.value);
+});
+
+function stat(k, v, cls) {
+  return `<div class="stat"><div class="k">${k}</div><div class="v ${cls || ''}">${v}</div></div>`;
+}
+
+function duration(s) {
+  if (s === null || s === undefined) return '–';
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
+  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+// Build the 16 LED elements once, positioned around a circle. Their colour/
+// blink state is updated on every poll, not rebuilt.
+const ring = document.getElementById('ring-wrap');
+const leds = [];
+for (let i = 0; i < NUM_SLOTS; i++) {
+  const angle = (i / NUM_SLOTS) * 2 * Math.PI - Math.PI / 2;
+  const x = 50 + 42 * Math.cos(angle);
+  const y = 50 + 42 * Math.sin(angle);
+  const el = document.createElement('div');
+  el.className = 'led';
+  el.style.left = x + '%';
+  el.style.top = y + '%';
+  el.textContent = i + 1;
+  ring.appendChild(el);
+  leds.push(el);
+}
+
+document.getElementById('legend').innerHTML = Object.keys(LABELS).map(s =>
+  `<span><i style="background:${COLORS[s] || 'var(--off-ring)'}"></i>${LABELS[s]}${BLINKING.has(s) ? ' (blink)' : ''}</span>`
+).join('');
+
+function renderRing(hw, modules) {
+  const stale = hw ? hw.stale : true;
+  ring.classList.toggle('stale', stale);
+
+  const bySlot = {};
+  for (const m of modules) bySlot[m.module] = m;
+
+  const states = hw ? hw.modules : Array(NUM_SLOTS).fill('OFF');
+  leds.forEach((el, i) => {
+    const state = states[i] || 'OFF';
+    const color = COLORS[state];
+    el.style.background = color || 'var(--off-ring)';
+    el.classList.toggle('blink', BLINKING.has(state));
+    const m = bySlot[i + 1];
+    const who = m && m.session_id ? (m.project || 'unknown project') : '';
+    el.title = `Slot ${i + 1}: ${LABELS[state] || state}${who ? ' — ' + who : ''}`;
+  });
+
+  document.getElementById('heartbeat').classList.toggle('live', !stale);
+  document.getElementById('up-text').textContent = hw ? duration(hw.uptime_seconds) : 'no board';
+
+  document.getElementById('stat-row').innerHTML = hw ? [
+    stat('Brightness', hw.brightness_pct + '%'),
+    stat('Contact', hw.stale ? 'stale' : 'fresh', hw.stale ? 'alert' : 'good'),
+    stat('Protocol', hw.protocol_version ? 'v' + hw.protocol_version : 'unknown'),
+    stat('Free SRAM', hw.free_ram_bytes + ' B'),
+  ].join('') : stat('Board', 'not answering STATUS', 'alert');
+
+  const buzzerCard = document.getElementById('buzzer-card');
+  const buzzing = hw ? hw.buzzer : false;
+  buzzerCard.classList.toggle('active', buzzing);
+  document.getElementById('buzzer-text').textContent = buzzing
+    ? 'Alarming — a slot has been BLOCKED past its timeout'
+    : 'Quiet';
+  document.getElementById('silence-btn').disabled = !buzzing;
+
+  const list = document.getElementById('slot-list');
+  const claimed = modules.filter(m => m.session_id);
+  list.innerHTML = claimed.length ? claimed.map(m => {
+    const isSub = m.session_id.includes('#agent:');
+    return `<div class="row"><span>${isSub ? '↳ subagent' : (m.project || 'unknown project')} · ${LABELS[m.state] || m.state}</span><b>${duration(m.state_seconds)}</b></div>`;
+  }).join('') : '<div class="row hint">Nothing claimed yet — start a Claude Code session with hooks installed.</div>';
+}
+
+document.getElementById('silence-btn').addEventListener('click', async () => {
+  const port = controlPortInput.value || '8766';
+  try {
+    await fetch(`http://127.0.0.1:${port}/button`, { method: 'POST' });
+  } catch (e) {
+    alert('Could not reach the virtual board\'s control server on port ' + port +
+      '. Is simulator/virtual_board.py running? (Real hardware has a physical button instead.)');
+  }
+});
+
+let failures = 0;
+async function poll() {
+  const liveDot = document.getElementById('live-dot');
+  const liveText = document.getElementById('live-text');
+  try {
+    const r = await fetch('/api/status', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    renderRing(d.hardware, d.modules);
+    failures = 0;
+    liveDot.className = 'dot ok';
+    liveText.textContent = 'bridge live';
+  } catch (e) {
+    failures++;
+    if (failures >= 2) {
+      liveDot.className = 'dot bad';
+      liveText.textContent = 'bridge unreachable';
+      renderRing(null, []);
+    }
+  }
+}
+poll();
+setInterval(poll, 5000);
+</script>
+</body>
+</html>

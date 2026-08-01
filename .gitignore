@@ -7,6 +7,7 @@ build/
 # Bridge runtime state — machine-specific, regenerated on startup
 bridge/.bridge_state.json
 bridge/*.log
+simulator/.simulated_state.json
 
 # Python
 __pycache__/

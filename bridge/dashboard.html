@@ -12,10 +12,10 @@
     --line: #262a34;
     --text: #e6e8ee;
     --dim: #838a99;
-    --thinking: #d946ef;
     --working: #22c55e;
+    --dispatched: #a855f7;
     --idle: #ef4444;
-    --need-input: #3b82f6;
+    --blocked: #3b82f6;
     --off: #39404f;
   }
   @media (prefers-color-scheme: light) {
@@ -64,6 +64,16 @@
     width: 15px; height: 15px; border-radius: 50%;
     background: var(--accent, var(--off)); flex: none;
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--off)) 18%, transparent);
+  }
+  /* Solid vs. blinking is the role/urgency signal (mirrors the firmware's
+     own solid-vs-blinking green for a working session vs. a running
+     subagent), so it has to survive here too, not just on the desk. */
+  @keyframes blink-fade { 0%, 49% { opacity: 1; } 50%, 100% { opacity: .22; } }
+  .card.blink::before, .card.blink .swatch { animation: blink-fade .9s steps(1, end) infinite; }
+  .tag {
+    font-size: 10px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600; border: 1px solid var(--line);
+    border-radius: 5px; padding: 2px 6px;
   }
   .project {
     font-size: 21px; font-weight: 640; letter-spacing: -0.015em;
@@ -127,6 +137,8 @@
     background: var(--card-empty); border: 1px dashed var(--line);
     border-radius: 10px; padding: 13px; color: var(--dim); font-size: 13.5px;
   }
+  .ring-strip { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 4px; }
+  .ring-led { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
   .warn-banner {
     background: color-mix(in srgb, var(--idle) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--idle) 45%, transparent);
@@ -145,12 +157,12 @@
 
 <div class="grid" id="grid"></div>
 <div class="queue" id="queue-wrap" hidden>
-  <h2>Waiting for a free module</h2>
+  <h2>Waiting for a free slot</h2>
   <div id="queue"></div>
 </div>
 
 <div class="hw">
-  <h2>Hardware</h2>
+  <h2>Hardware <a href="/simulator" style="text-transform:none;font-weight:500;letter-spacing:normal;">— ring view →</a></h2>
   <div id="hw-warn"></div>
   <div class="hw-grid" id="hw-grid"></div>
 </div>
@@ -159,19 +171,25 @@
 
 <script>
 const COLORS = {
-  THINKING: 'var(--thinking)',
   WORKING: 'var(--working)',
+  DISPATCHED: 'var(--dispatched)',
+  BLOCKED: 'var(--blocked)',
   IDLE: 'var(--idle)',
-  NEED_INPUT: 'var(--need-input)',
+  RUNNING: 'var(--working)', // same colour as WORKING -- blink is what tells them apart
   OFF: 'var(--off)',
 };
 const LABELS = {
-  THINKING: 'Thinking',
   WORKING: 'Working',
-  IDLE: 'Awaiting permission',
-  NEED_INPUT: 'Needs you',
-  OFF: 'Idle',
+  DISPATCHED: 'Waiting on subagents',
+  BLOCKED: 'Needs you',
+  IDLE: 'Idle',
+  RUNNING: 'Subagent running',
+  OFF: 'Unclaimed',
 };
+// Same set the firmware blinks -- BLOCKED/IDLE for urgency, RUNNING as the
+// subagent role marker (see the `.blink` CSS rule above).
+const BLINKING = new Set(['BLOCKED', 'IDLE', 'RUNNING']);
+const AGENT_MARKER = '#agent:';
 
 function duration(s) {
   if (s === null || s === undefined) return '';
@@ -256,14 +274,19 @@ function render(d) {
   grid.innerHTML = '';
   for (const m of d.modules) {
     const claimed = m.session_id !== null;
+    const isSubagent = claimed && m.session_id.includes(AGENT_MARKER);
     const card = document.createElement('div');
-    card.className = 'card' + (claimed ? '' : ' empty');
+    card.className = 'card' + (claimed ? '' : ' empty') + (BLINKING.has(m.state) ? ' blink' : '');
     card.style.setProperty('--accent', COLORS[m.state] || 'var(--off)');
 
     const name = claimed ? (m.project || 'unknown project') : 'unclaimed';
+    // A subagent's tokens are already counted inside its parent's subagent
+    // bucket (see splitBlock on the parent's card) -- showing usage again
+    // here, keyed by a synthetic id with no transcript of its own, would
+    // just be a permanently-pending block.
     card.innerHTML = `
       <div class="card-top">
-        <span class="mod">Module ${m.module}</span>
+        <span class="mod">Slot ${m.module}${isSubagent ? ' <span class=\"tag\">subagent</span>' : ''}</span>
         <span class="swatch"></span>
       </div>
       <div class="project${claimed ? '' : ' none'}"></div>
@@ -271,7 +294,7 @@ function render(d) {
         <span class="state"></span>
         <span class="elapsed"></span>
       </div>
-      ${claimed ? usageBlock(m.usage) : ''}`;
+      ${claimed && !isSubagent ? usageBlock(m.usage) : ''}`;
     card.querySelector('.project').textContent = name;
     card.querySelector('.state').textContent = LABELS[m.state] || m.state;
     card.querySelector('.elapsed').textContent = claimed ? duration(m.state_seconds) : '';
@@ -283,9 +306,10 @@ function render(d) {
   qw.hidden = d.queue.length === 0;
   q.innerHTML = '';
   for (const item of d.queue) {
+    const isSubagent = item.session_id && item.session_id.includes(AGENT_MARKER);
     const el = document.createElement('div');
     el.className = 'qitem';
-    el.innerHTML = `<span></span><span class="dimtext">pid ${item.claude_pid ?? '?'}</span>`;
+    el.innerHTML = `<span></span><span class="dimtext">${isSubagent ? 'subagent · ' : ''}pid ${item.claude_pid ?? '?'}</span>`;
     el.querySelector('span').textContent = item.project || 'unknown project';
     q.appendChild(el);
   }
@@ -330,18 +354,23 @@ function renderHardware(d) {
   // Bridge and firmware disagreeing means a command was lost or rejected.
   // Nothing else in the system can see this, so it gets top billing.
   warn.innerHTML = (hw.desync && hw.desync.length)
-    ? `<div class="warn-banner">Desync: module ${hw.desync.join(', ')} — the board ` +
+    ? `<div class="warn-banner">Desync: slot ${hw.desync.join(', ')} — the board ` +
       `is showing something different from what the bridge last sent.</div>`
     : '';
 
   const ramLow = hw.free_ram_bytes < 400;
+  const ringHtml = '<div class="stat"><div class="k">Board sees</div>' +
+    '<div class="ring-strip">' + hw.modules.map(s =>
+      `<span class="ring-led" style="background:${COLORS[s] || 'var(--off)'}" title="${esc(s)}"></span>`
+    ).join('') + '</div></div>';
   grid.innerHTML = [
     stat('Board uptime', duration(hw.uptime_seconds)),
     stat('Brightness', hw.brightness_pct + '%'),
     stat('Contact', hw.stale ? 'stale' : 'fresh', hw.stale ? 'alert' : 'good'),
     stat('Buzzer', hw.buzzer ? 'sounding' : 'silent', hw.buzzer ? 'alert' : ''),
     stat('Free SRAM', hw.free_ram_bytes + ' B', ramLow ? 'alert' : ''),
-    stat('Board sees', hw.modules.map(m => (m || '?').replace('NEED_INPUT', 'NEED')).join(' · ')),
+    stat('Protocol', hw.protocol_version ? ('v' + hw.protocol_version) : 'unknown'),
+    ringHtml,
   ].join('');
 }
 
@@ -369,7 +398,7 @@ async function poll() {
   }
 }
 poll();
-setInterval(poll, 1000);
+setInterval(poll, 5000);
 </script>
 </body>
 </html>
